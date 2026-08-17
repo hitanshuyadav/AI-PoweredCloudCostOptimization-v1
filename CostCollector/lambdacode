@@ -1,0 +1,124 @@
+import boto3
+import os
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+
+# AWS clients
+ce = boto3.client("ce")
+
+dynamodb = boto3.resource("dynamodb")
+
+table = dynamodb.Table(
+    os.environ["DYNAMODB_TABLE"]
+)
+
+
+def get_cost_data():
+
+    end_date = datetime.now(timezone.utc).date()
+
+    start_date = end_date - timedelta(days=30)
+
+    print(f"Getting AWS costs from {start_date} to {end_date}")
+
+    response = ce.get_cost_and_usage(
+        TimePeriod={
+            "Start": start_date.isoformat(),
+            "End": end_date.isoformat()
+        },
+
+        Granularity="DAILY",
+
+        Metrics=[
+            "UnblendedCost"
+        ],
+
+        GroupBy=[
+            {
+                "Type": "DIMENSION",
+                "Key": "SERVICE"
+            }
+        ]
+    )
+
+    return response
+
+
+def store_cost_data(response):
+
+    total_records = 0
+
+    for period in response["ResultsByTime"]:
+
+        start = period["TimePeriod"]["Start"]
+        end = period["TimePeriod"]["End"]
+
+        for group in period["Groups"]:
+
+            service = group["Keys"][0]
+
+            amount = Decimal(
+                group["Metrics"]["UnblendedCost"]["Amount"]
+            )
+
+            currency = group["Metrics"][
+                "UnblendedCost"
+            ]["Unit"]
+
+            item = {
+                "resource_id": f"COST#{service}",
+                "record_type": "COST",
+                "service": service,
+                "cost": amount,
+                "currency": currency,
+                "period_start": start,
+                "period_end": end,
+                "collected_at": datetime.now(
+                    timezone.utc
+                ).isoformat()
+            }
+
+            table.put_item(
+                Item=item
+            )
+
+            total_records += 1
+
+            print(
+                f"{start} | {service} | "
+                f"{amount} {currency}"
+            )
+
+    return total_records
+
+
+def lambda_handler(event, context):
+
+    print("Starting cost collection...")
+
+    try:
+
+        response = get_cost_data()
+
+        records = store_cost_data(
+            response
+        )
+
+        print(
+            f"Cost collection completed. "
+            f"Records stored: {records}"
+        )
+
+        return {
+            "statusCode": 200,
+            "records_stored": records
+        }
+
+    except Exception as error:
+
+        print(
+            f"Cost collection failed: {str(error)}"
+        )
+
+        raise

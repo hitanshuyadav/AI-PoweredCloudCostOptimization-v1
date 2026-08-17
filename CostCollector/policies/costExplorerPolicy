@@ -1,0 +1,21 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "Statement1",
+            "Effect": "Allow",
+            "Action": [
+                "ce:GetCostAndUsage"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "Statement2",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:PutItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:205500198772:table/cloud-cost-resources"
+        }
+    ]
+}

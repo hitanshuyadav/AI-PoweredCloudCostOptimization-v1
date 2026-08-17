@@ -1,0 +1,200 @@
+import boto3
+import os
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+
+ec2 = boto3.client("ec2")
+
+cloudwatch = boto3.client("cloudwatch")
+
+dynamodb = boto3.resource("dynamodb")
+
+table = dynamodb.Table(
+    os.environ["DYNAMODB_TABLE"]
+)
+
+
+def get_average_metric(
+    instance_id,
+    metric_name,
+    start_time,
+    end_time
+):
+
+    response = cloudwatch.get_metric_statistics(
+        Namespace="AWS/EC2",
+
+        MetricName=metric_name,
+
+        Dimensions=[
+            {
+                "Name": "InstanceId",
+                "Value": instance_id
+            }
+        ],
+
+        StartTime=start_time,
+
+        EndTime=end_time,
+
+        Period=3600,
+
+        Statistics=[
+            "Average"
+        ]
+    )
+
+    datapoints = response.get(
+        "Datapoints",
+        []
+    )
+
+    if not datapoints:
+        return None
+
+    values = [
+        point["Average"]
+        for point in datapoints
+    ]
+
+    average = sum(values) / len(values)
+
+    return Decimal(
+        str(round(average, 4))
+    )
+
+
+def collect_instance_metrics(
+    instance_id
+):
+
+    end_time = datetime.now(
+        timezone.utc
+    )
+
+    start_time = end_time - timedelta(
+        days=7
+    )
+
+    metrics = [
+        "CPUUtilization",
+        "NetworkIn",
+        "NetworkOut",
+        "DiskReadOps",
+        "DiskWriteOps"
+    ]
+
+    results = []
+
+    for metric_name in metrics:
+
+        average = get_average_metric(
+            instance_id,
+            metric_name,
+            start_time,
+            end_time
+        )
+
+        result = {
+            "metric_name": metric_name,
+            "average": average,
+            "period_days": 7
+        }
+
+        results.append(result)
+
+    return results
+
+
+def collect_ec2_metrics():
+
+    response = ec2.describe_instances()
+
+    all_metrics = []
+
+    for reservation in response[
+        "Reservations"
+    ]:
+
+        for instance in reservation[
+            "Instances"
+        ]:
+
+            instance_id = instance[
+                "InstanceId"
+            ]
+
+            print(
+                f"Collecting metrics for "
+                f"{instance_id}"
+            )
+
+            metrics = collect_instance_metrics(
+                instance_id
+            )
+
+            for metric in metrics:
+
+                item = {
+                    "resource_id":
+                        f"METRIC#EC2#{instance_id}",
+
+                    "record_type":
+                        "METRIC",
+
+                    "metric_name":
+                        metric["metric_name"],
+
+                    "average":
+                        metric["average"],
+
+                    "period_days":
+                        metric["period_days"],
+
+                    "collected_at":
+                        datetime.now(
+                            timezone.utc
+                        ).isoformat()
+                }
+
+                table.put_item(
+                    Item=item
+                )
+
+                all_metrics.append(item)
+
+    return all_metrics
+
+
+def lambda_handler(event, context):
+
+    print(
+        "Starting CloudWatch "
+        "metrics collection..."
+    )
+
+    try:
+
+        metrics = collect_ec2_metrics()
+
+        print(
+            f"Collected {len(metrics)} "
+            f"metric records"
+        )
+
+        return {
+            "statusCode": 200,
+            "metrics_collected":
+                len(metrics)
+        }
+
+    except Exception as error:
+
+        print(
+            f"Metrics collection failed: "
+            f"{str(error)}"
+        )
+
+        raise
+

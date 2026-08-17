@@ -1,0 +1,129 @@
+import boto3
+import os
+from datetime import datetime, timezone
+
+
+# AWS clients
+ec2 = boto3.client("ec2")
+s3 = boto3.client("s3")
+dynamodb = boto3.resource("dynamodb")
+
+table = dynamodb.Table(
+    os.environ["DYNAMODB_TABLE"]
+)
+
+
+def collect_ec2_instances():
+
+    response = ec2.describe_instances()
+
+    resources = []
+
+    for reservation in response["Reservations"]:
+
+        for instance in reservation["Instances"]:
+
+            resource = {
+                "resource_id": instance["InstanceId"],
+                "service": "EC2",
+                "resource_type": instance["InstanceType"],
+                "state": instance["State"]["Name"],
+                "region": os.environ["AWS_REGION"],
+                "collected_at": datetime.now(
+                    timezone.utc
+                ).isoformat()
+            }
+
+            resources.append(resource)
+
+    return resources
+
+
+def collect_ebs_volumes():
+
+    response = ec2.describe_volumes()
+
+    resources = []
+
+    for volume in response["Volumes"]:
+
+        resource = {
+            "resource_id": volume["VolumeId"],
+            "service": "EBS",
+            "resource_type": volume["VolumeType"],
+            "state": volume["State"],
+            "size_gb": volume["Size"],
+            "region": os.environ["AWS_REGION"],
+            "collected_at": datetime.now(
+                timezone.utc
+            ).isoformat()
+        }
+
+        resources.append(resource)
+
+    return resources
+
+
+def collect_s3_buckets():
+
+    response = s3.list_buckets()
+
+    resources = []
+
+    for bucket in response["Buckets"]:
+
+        resource = {
+            "resource_id": bucket["Name"],
+            "service": "S3",
+            "resource_type": "Bucket",
+            "created_at": bucket["CreationDate"].isoformat(),
+            "region": os.environ["AWS_REGION"],
+            "collected_at": datetime.now(
+                timezone.utc
+            ).isoformat()
+        }
+
+        resources.append(resource)
+
+    return resources
+
+
+def store_resource(resource):
+
+    table.put_item(
+        Item=resource
+    )
+
+
+def lambda_handler(event, context):
+
+    print("Starting AWS resource collection...")
+
+    all_resources = []
+
+    # EC2
+    ec2_resources = collect_ec2_instances()
+    all_resources.extend(ec2_resources)
+
+    # EBS
+    ebs_resources = collect_ebs_volumes()
+    all_resources.extend(ebs_resources)
+
+    # S3
+    s3_resources = collect_s3_buckets()
+    all_resources.extend(s3_resources)
+
+    # Store everything in DynamoDB
+    for resource in all_resources:
+
+        store_resource(resource)
+
+    print(
+        f"Collected {len(all_resources)} resources"
+    )
+
+    return {
+        "statusCode": 200,
+        "resources_collected": len(all_resources),
+        "resources": all_resources
+    }

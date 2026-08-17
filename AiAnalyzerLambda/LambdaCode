@@ -1,0 +1,343 @@
+import boto3
+import json
+import os
+from decimal import Decimal
+
+
+# -----------------------------
+# AWS Clients
+# -----------------------------
+
+dynamodb = boto3.resource("dynamodb")
+
+table = dynamodb.Table(
+    os.environ["DYNAMODB_TABLE"]
+)
+
+bedrock = boto3.client(
+    "bedrock-runtime"
+)
+
+sns = boto3.client("sns")
+
+
+MODEL_ID = os.environ["MODEL_ID"]
+
+SNS_TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]
+
+
+# -----------------------------
+# DynamoDB Decimal conversion
+# -----------------------------
+
+def decimal_to_float(obj):
+
+    if isinstance(obj, Decimal):
+        return float(obj)
+
+    raise TypeError(
+        f"Object of type {type(obj)} "
+        "is not JSON serializable"
+    )
+
+
+# -----------------------------
+# Scan DynamoDB
+# -----------------------------
+
+def get_all_data():
+
+    print("Scanning DynamoDB...")
+
+    items = []
+
+    response = table.scan()
+
+    items.extend(
+        response.get("Items", [])
+    )
+
+    # Handle pagination
+    while "LastEvaluatedKey" in response:
+
+        response = table.scan(
+            ExclusiveStartKey=
+            response["LastEvaluatedKey"]
+        )
+
+        items.extend(
+            response.get("Items", [])
+        )
+
+    print(
+        f"Retrieved {len(items)} "
+        "items from DynamoDB"
+    )
+
+    return items
+
+
+# -----------------------------
+# Separate the data
+# -----------------------------
+
+def organize_data(items):
+
+    resources = []
+    costs = []
+    metrics = []
+
+    for item in items:
+
+        record_type = item.get(
+            "record_type"
+        )
+
+        if record_type == "RESOURCE":
+
+            resources.append(item)
+
+        elif record_type == "COST":
+
+            costs.append(item)
+
+        elif record_type == "METRIC":
+
+            metrics.append(item)
+
+    return {
+        "resources": resources,
+        "costs": costs,
+        "metrics": metrics
+    }
+
+
+# -----------------------------
+# Build AI prompt
+# -----------------------------
+
+def build_prompt(data):
+
+    data_json = json.dumps(
+        data,
+        default=decimal_to_float,
+        indent=2
+    )
+
+    prompt = f"""
+You are an AWS Cloud Cost Optimization Expert.
+
+Analyze the AWS infrastructure, cost, and
+CloudWatch metric data provided below.
+
+Your objective is to identify potential AWS
+cost optimization opportunities.
+
+Analyze:
+
+1. Underutilized EC2 instances.
+2. Potentially oversized EC2 instances.
+3. Stopped resources that may still generate costs.
+4. Potentially unnecessary EBS volumes.
+5. High-cost AWS services.
+6. Unusual or potentially inefficient spending.
+7. Other obvious cost optimization opportunities.
+
+IMPORTANT RULES:
+
+- Only use the information provided.
+- Do not invent AWS resources.
+- Do not invent costs.
+- Do not invent CloudWatch metrics.
+- Do not claim guaranteed savings.
+- If there is not enough information, say so.
+- Do not recommend deleting production resources blindly.
+- Recommendations must be conservative and actionable.
+
+For each recommendation provide:
+
+- service
+- resource_id
+- issue
+- evidence
+- recommendation
+- priority
+- estimated_savings_if_possible
+
+Return the response as clear, human-readable text.
+
+AWS DATA:
+
+{data_json}
+"""
+
+    return prompt
+
+
+# -----------------------------
+# Invoke Amazon Bedrock
+# -----------------------------
+
+def invoke_bedrock(prompt):
+
+    print(
+        f"Invoking Bedrock model: {MODEL_ID}"
+    )
+
+    response = bedrock.converse(
+
+        modelId=MODEL_ID,
+
+        system=[
+            {
+                "text": """
+You are an AWS Cloud Cost Optimization
+Expert.
+
+Your recommendations must be based only
+on the AWS data provided by the user.
+
+Never fabricate costs, resources,
+metrics, or savings.
+"""
+            }
+        ],
+
+        messages=[
+            {
+                "role": "user",
+
+                "content": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
+
+        inferenceConfig={
+            "temperature": 0.2,
+            "maxTokens": 3000
+        }
+    )
+
+    recommendation = (
+        response["output"]
+        ["message"]
+        ["content"][0]
+        ["text"]
+    )
+
+    return recommendation
+
+
+# -----------------------------
+# Send recommendation through SNS
+# -----------------------------
+
+def send_notification(message):
+
+    print("Sending recommendation to SNS...")
+
+    response = sns.publish(
+
+        TopicArn=SNS_TOPIC_ARN,
+
+        Subject=(
+            "AWS Cloud Cost "
+            "Optimization Report"
+        ),
+
+        Message=message
+    )
+
+    return response
+
+
+# -----------------------------
+# Lambda Handler
+# -----------------------------
+
+def lambda_handler(event, context):
+
+    print(
+        "Starting AI Cost Analyzer..."
+    )
+
+    try:
+
+        # 1. Read DynamoDB
+        items = get_all_data()
+
+        if not items:
+
+            print(
+                "No data found in DynamoDB."
+            )
+
+            return {
+                "statusCode": 404,
+                "body": "No AWS data found."
+            }
+
+        # 2. Organize data
+        data = organize_data(items)
+
+        print(
+            f"Resources: "
+            f"{len(data['resources'])}"
+        )
+
+        print(
+            f"Costs: "
+            f"{len(data['costs'])}"
+        )
+
+        print(
+            f"Metrics: "
+            f"{len(data['metrics'])}"
+        )
+
+        # 3. Build prompt
+        prompt = build_prompt(data)
+
+        # 4. Invoke Bedrock
+        recommendation = invoke_bedrock(
+            prompt
+        )
+
+        print(
+            "Bedrock analysis completed."
+        )
+
+        print(
+            recommendation
+        )
+
+        # 5. Send SNS
+        send_notification(
+            recommendation
+        )
+
+        print(
+            "AI Cost Analyzer completed."
+        )
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "message":
+                    "Cost analysis completed",
+                "recommendation":
+                    recommendation
+            })
+        }
+
+    except Exception as error:
+
+        print(
+            f"AI Analyzer failed: "
+            f"{str(error)}"
+        )
+
+        raise
