@@ -454,3 +454,6 @@ For example, collection functions can have read-only permissions such as:
 ```text
 ec2:DescribeI
 ```
+```codeforgrowthX
+code: T7WJWD
+```
